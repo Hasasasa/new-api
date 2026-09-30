@@ -188,6 +188,16 @@ export const TASK_ACTIONS = {
   FIRST_TAIL_GENERATE: 'firstTailGenerate', // 首尾生视频
   REFERENCE_GENERATE: 'referenceGenerate', // 参照生视频
   REMIX_GENERATE: 'remixGenerate', // 视频 Remix
+
+  // Canonical video actions emitted by the task plugins
+  IMAGE_TO_VIDEO: 'image_to_video',
+  TEXT_TO_VIDEO: 'text_to_video',
+  FIRST_TAIL_TO_VIDEO: 'first_tail_to_video',
+  REFERENCE_TO_VIDEO: 'reference_to_video',
+
+  // 3D generation
+  TEXT_TO_3D: 'text_to_3d',
+  IMAGE_TO_3D: 'image_to_3d',
 } as const
 
 /**
@@ -304,6 +314,20 @@ export const TASK_ACTION_MAPPINGS: Record<string, StatusMapping> = {
     label: 'Video Remix',
     variant: 'blue',
   },
+  // The task plugins persist canonical snake_case actions, not the legacy
+  // camelCase names above, so each one needs its own entry.
+  [TASK_ACTIONS.IMAGE_TO_VIDEO]: { label: 'Image to Video', variant: 'blue' },
+  [TASK_ACTIONS.TEXT_TO_VIDEO]: { label: 'Text to Video', variant: 'blue' },
+  [TASK_ACTIONS.FIRST_TAIL_TO_VIDEO]: {
+    label: 'First/Last Frame to Video',
+    variant: 'blue',
+  },
+  [TASK_ACTIONS.REFERENCE_TO_VIDEO]: {
+    label: 'Reference Video',
+    variant: 'blue',
+  },
+  [TASK_ACTIONS.TEXT_TO_3D]: { label: 'Text to 3D', variant: 'purple' },
+  [TASK_ACTIONS.IMAGE_TO_3D]: { label: 'Image to 3D', variant: 'purple' },
 }
 
 /**

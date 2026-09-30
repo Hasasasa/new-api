@@ -625,9 +625,31 @@ func updateVideoSingleTask(ctx context.Context, adaptor TaskPollingAdaptor, ch *
 // finalizeTerminalTask 终态统一收尾（状态 CAS 赢家调用，恰好一次）：采样 + 结算 + 失败兜底退款。
 func finalizeTerminalTask(ctx context.Context, adaptor TaskPollingAdaptor, task *model.Task, taskResult *relaycommon.TaskInfo) {
 	perfmetrics.RecordTaskResult(task, taskResult)
+	UpdateTaskConsumeLogUseTime(ctx, task)
 	billingSettled := settleTaskBillingOnComplete(ctx, adaptor, task, taskResult)
 	if task.Status == model.TaskStatusFailure && !billingSettled && task.Quota != 0 {
 		RefundTaskQuota(ctx, task, task.FailReason)
+	}
+}
+
+// UpdateTaskConsumeLogUseTime rewrites the submission consume log with the
+// job's real duration. An asynchronous task's log is written when the task is
+// persisted, while the generation is still queued, so its use_time can only
+// cover the submit call. The task row carries the authoritative interval, and
+// the executor is identified by the request id the submission recorded, so a
+// re-poll, another node, or a client that already disconnected all resolve to
+// the same row. The task row is left untouched on failure: the periodic
+// task-log purge may have removed the log, and that must not fail the terminal
+// transition.
+func UpdateTaskConsumeLogUseTime(ctx context.Context, task *model.Task) {
+	if task == nil || task.StartTime <= 0 || task.FinishTime <= 0 || task.FinishTime < task.StartTime {
+		return
+	}
+	if task.PrivateData.Execution == nil || task.PrivateData.Execution.RequestID == "" {
+		return
+	}
+	if err := model.UpdateLogUseTimeByRequestID(ctx, task.PrivateData.Execution.RequestID, int(task.FinishTime-task.StartTime)); err != nil {
+		logger.LogWarn(ctx, fmt.Sprintf("回写任务 %s 消耗日志耗时失败: %s", task.TaskID, err.Error()))
 	}
 }
 

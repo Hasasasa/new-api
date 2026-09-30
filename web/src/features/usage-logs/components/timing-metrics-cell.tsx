@@ -219,12 +219,16 @@ export function StreamTpsCell(props: StreamTpsCellProps) {
           </TooltipProvider>
         )}
       </span>
-      {(!props.compact ||
-        (props.isStream && props.tokensPerSecond != null)) && (
-        <span className='text-muted-foreground/60 px-0.5 tabular-nums'>
-          {tpsLabel}
-        </span>
-      )}
+      {/* A task row's completion tokens are the vendor's own unit count, not
+          generated text, so its duration must never be rendered as a token
+          throughput. */}
+      {!props.isTask &&
+        (!props.compact ||
+          (props.isStream && props.tokensPerSecond != null)) && (
+          <span className='text-muted-foreground/60 px-0.5 tabular-nums'>
+            {tpsLabel}
+          </span>
+        )}
     </div>
   )
 }

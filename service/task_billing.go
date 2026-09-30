@@ -7,6 +7,7 @@ import (
 	"maps"
 	"math"
 	"strings"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
@@ -78,6 +79,22 @@ func LogTaskConsumption(c *gin.Context, info *relaycommon.RelayInfo, task *model
 	}
 	appendTaskLogInfo(task, other)
 	attachQuotaSaturation(c, info, other)
+	// This log is written while the submission request is still open, so at a
+	// synchronous upstream completion (immediate result, or an openai_image
+	// task the host polled to terminal) the whole job already ran and the real
+	// duration is authoritative. An asynchronous job only reports the submit
+	// call here; UpdateTaskConsumeLogUseTime rewrites that once the poller
+	// settles the task.
+	useTimeSeconds := 0
+	if !info.StartTime.IsZero() {
+		useTimeSeconds = int(time.Now().Unix() - info.StartTime.Unix())
+	}
+	if task != nil && task.FinishTime > 0 && task.StartTime > 0 {
+		useTimeSeconds = int(task.FinishTime - task.StartTime)
+	}
+	if useTimeSeconds < 0 {
+		useTimeSeconds = 0
+	}
 	model.RecordConsumeLog(c, info.UserId, model.RecordConsumeLogParams{
 		ChannelId: info.ChannelId,
 		ModelName: info.OriginModelName,
@@ -87,6 +104,8 @@ func LogTaskConsumption(c *gin.Context, info *relaycommon.RelayInfo, task *model
 		TokenId:   info.TokenId,
 		Group:     info.UsingGroup,
 		Other:     other,
+		// Task rows report the job's own duration, never a token throughput.
+		UseTimeSeconds: useTimeSeconds,
 	})
 	model.UpdateUserUsedQuotaAndRequestCount(info.UserId, info.PriceData.Quota)
 	model.UpdateChannelUsedQuota(info.ChannelId, info.PriceData.Quota)

@@ -1801,3 +1801,56 @@ func TestSettle_TokenRecalcFallsBackToCompletionTokens(t *testing.T) {
 		})
 	}
 }
+
+// A task's consume log is written while the generation is still queued, so its
+// duration has to come from the task row once the poller settles it. The
+// submission request id is the only link available to the poller, which runs
+// with no relay context.
+func TestTaskConsumeLogUseTimeFollowsTheJobDuration(t *testing.T) {
+	truncate(t)
+	const userID, channelID = 41, 41
+	seedUser(t, userID, 10_000)
+	seedChannel(t, channelID)
+
+	requestID := "req-task-use-time"
+	task := makeTask(userID, channelID, 100, 0, BillingSourceWallet, 0)
+	task.PrivateData.Execution = &model.TaskExecutionSnapshot{RequestID: requestID}
+	info := &relaycommon.RelayInfo{
+		UserId:        userID,
+		ChannelMeta:   &relaycommon.ChannelMeta{ChannelId: channelID},
+		StartTime:     time.Now().Add(-2 * time.Second),
+		TaskRelayInfo: &relaycommon.TaskRelayInfo{Action: "text_to_video"},
+		PriceData: types.PriceData{
+			ModelPrice:     0.02,
+			Quota:          100,
+			GroupRatioInfo: types.GroupRatioInfo{GroupRatio: 1},
+		},
+	}
+
+	// Submission: the job has not run yet, so only the submit call is measured.
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/videos", nil)
+	common.SetContextKey(ctx, common.RequestIdKey, requestID)
+	LogTaskConsumption(ctx, info, task)
+	submitted := getLastLog(t)
+	require.NotNil(t, submitted)
+	require.Equal(t, requestID, submitted.RequestId)
+	assert.LessOrEqual(t, submitted.UseTime, 2, "an asynchronous submit must not report the job duration yet")
+
+	// The poller settles the task 31 seconds after the upstream started.
+	task.StartTime = time.Now().Unix() - 31
+	task.FinishTime = time.Now().Unix()
+	UpdateTaskConsumeLogUseTime(context.Background(), task)
+
+	settled := getLastLog(t)
+	require.NotNil(t, settled)
+	assert.Equal(t, submitted.Id, settled.Id, "the rewrite must target the submission log, not append one")
+	assert.Equal(t, 31, settled.UseTime)
+	assert.Equal(t, int64(1), countLogs(t), "settling must not add a second consume log")
+
+	// A task with no recorded request id cannot be matched, and must not fail.
+	unlinked := makeTask(userID, channelID, 100, 0, BillingSourceWallet, 0)
+	unlinked.StartTime, unlinked.FinishTime = 1, 2
+	UpdateTaskConsumeLogUseTime(context.Background(), unlinked)
+	assert.Equal(t, 31, getLastLog(t).UseTime)
+}

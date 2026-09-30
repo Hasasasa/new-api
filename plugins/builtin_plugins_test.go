@@ -11,7 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-var expectedKeys = []string{"alibaba", "doubao", "google", "hailuo", "jimeng", "kling", "sora", "sunoapi", "vertex-ai", "vidu"}
+var expectedKeys = []string{"alibaba", "doubao", "google", "hailuo", "jimeng", "kling", "sora", "sunoapi", "tokenhub", "vertex-ai", "vidu", "worldlabs"}
 
 func TestBuiltInVendorPluginsDeclareNativeRoutesAndLegacyChannelTypes(t *testing.T) {
 	generation := jsplugin.DefaultRegistry.Generation()
@@ -29,6 +29,13 @@ func TestBuiltInVendorPluginsDeclareNativeRoutesAndLegacyChannelTypes(t *testing
 		{"POST", "/kling/v1/videos/image2video", "kling", jsplugin.RouteTypeSubmit, "image_to_video", "taskCreated"},
 		{"GET", "/kling/v1/videos/text2video/:task_id", "kling", jsplugin.RouteTypeQuery, "", "taskStatus"},
 		{"GET", "/kling/v1/videos/image2video/:task_id", "kling", jsplugin.RouteTypeQuery, "", "taskStatus"},
+		{"POST", "/kling/text-to-video", "kling", jsplugin.RouteTypeSubmit, "text_to_video", "taskCreated"},
+		{"POST", "/kling/image-to-video", "kling", jsplugin.RouteTypeSubmit, "image_to_video", "taskCreated"},
+		{"POST", "/tokenhub/v1/api/3d/submit", "tokenhub", jsplugin.RouteTypeSubmit, "", "renderSubmit"},
+		{"POST", "/tokenhub/v1/api/3d/query", "tokenhub", jsplugin.RouteTypeDynamic, "", "renderQuery"},
+		{"GET", "/kling/tasks/:task_id", "kling", jsplugin.RouteTypeQuery, "", "taskStatus"},
+		{"POST", "/worldlabs/marble/v1/worlds/generate", "worldlabs", jsplugin.RouteTypeSubmit, "", "renderOperation"},
+		{"GET", "/worldlabs/marble/v1/operations/:task_id", "worldlabs", jsplugin.RouteTypeQuery, "", "renderOperation"},
 		{"POST", "/jimeng/", "jimeng", jsplugin.RouteTypeDynamic, "", "renderTask"},
 		{"POST", "/suno/submit/:action", "sunoapi", jsplugin.RouteTypeSubmit, "", "renderSubmit"},
 		{"POST", "/suno/fetch", "sunoapi", jsplugin.RouteTypeDynamic, "", "renderTasks"},

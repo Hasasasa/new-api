@@ -98,6 +98,35 @@ func ensureLogRequestId(log *Log) {
 	}
 }
 
+// UpdateLogUseTimeByRequestID sets use_time on a consume log the caller
+// already wrote. An asynchronous task's consume log is created at submission,
+// while the generation is still queued; the poller rewrites it with the job's
+// real duration once the task reaches a terminal status.
+//
+// ClickHouse has no UPDATE, so the corrected row is rewritten with
+// ALTER TABLE ... UPDATE and mutations_sync=1, matching the synchronous
+// mutation DeleteOldLogBatch already relies on there. A log that no longer
+// exists (purged by the retention sweep, or the log database is unreachable)
+// is not an error: there is nothing left to correct.
+func UpdateLogUseTimeByRequestID(ctx context.Context, requestID string, useTimeSeconds int) error {
+	if requestID == "" || useTimeSeconds < 0 {
+		return nil
+	}
+	if common.UsingLogDatabase(common.DatabaseTypeClickHouse) {
+		if err := LOG_DB.WithContext(ctx).Exec(
+			"ALTER TABLE logs UPDATE use_time = ? WHERE request_id = ? SETTINGS mutations_sync = 1",
+			useTimeSeconds,
+			requestID,
+		).Error; err != nil {
+			return fmt.Errorf("update log use_time: %w", err)
+		}
+		return nil
+	}
+	return LOG_DB.WithContext(ctx).Model(&Log{}).
+		Where("request_id = ?", requestID).
+		Update("use_time", useTimeSeconds).Error
+}
+
 func createLog(log *Log) error {
 	ensureLogRequestId(log)
 	return LOG_DB.Create(log).Error

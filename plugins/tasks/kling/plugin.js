@@ -1,3 +1,31 @@
+// Kling 3.0 bills per output second by resolution and native audio.
+const V3_USAGE_SCHEMA = {
+  seconds: {
+    type: "number",
+    unit: "second",
+    description: { en: "Video generation unit price", zh: "视频生成单价" },
+  },
+  resolution: {
+    enum: ["720p", "1080p", "4k"],
+    description: { en: "Output video resolution", zh: "输出视频分辨率" },
+  },
+  // Named apart from the request's settings.audio string, which the host
+  // validates against any usage fact sharing its key.
+  native_audio: {
+    type: "boolean",
+    description: { en: "Whether native audio is generated", zh: "是否生成原生音频" },
+  },
+};
+
+// Kling 3.0 Turbo has no 4k and no native audio, so it bills by seconds and resolution only.
+const V3_TURBO_USAGE_SCHEMA = {
+  seconds: V3_USAGE_SCHEMA.seconds,
+  resolution: {
+    enum: ["720p", "1080p"],
+    description: V3_USAGE_SCHEMA.resolution.description,
+  },
+};
+
 export const meta = {
   apiVersion: 1,
   key: "kling",
@@ -7,10 +35,10 @@ export const meta = {
     en: "Kuaishou Kling video generation (text-to-video and image-to-video)",
     zh: "快手可灵视频生成（文生视频、图生视频）",
   },
-  version: "1.1.0",
+  version: "1.2.0",
   author: { name: "QuantumNous" },
   channelTypes: [50],
-  models: ["kling-v1", "kling-v1-6", "kling-v2-master"],
+  models: ["kling-v1", "kling-v1-6", "kling-v2-master", "kling-3.0", "kling-3.0-turbo"],
   fetchMode: "per_task",
   upstreams: ["vendor", "new_api"],
   usageSchema: {
@@ -28,12 +56,35 @@ export const meta = {
     { label: "v1-6 pro 10s", facts: { units: 7 } },
     { label: "v2-master pro 5s", facts: { units: 10 } },
   ],
+  usageProfiles: [
+    {
+      models: ["kling-3.0"],
+      schema: V3_USAGE_SCHEMA,
+      examples: [
+        { label: "3.0 720p 5s", facts: { seconds: 5, resolution: "720p", native_audio: false } },
+        { label: "3.0 1080p 5s · audio", facts: { seconds: 5, resolution: "1080p", native_audio: true } },
+        { label: "3.0 4k 15s", facts: { seconds: 15, resolution: "4k", native_audio: false } },
+      ],
+    },
+    {
+      models: ["kling-3.0-turbo"],
+      schema: V3_TURBO_USAGE_SCHEMA,
+      examples: [
+        { label: "3.0 turbo 720p 5s", facts: { seconds: 5, resolution: "720p" } },
+        { label: "3.0 turbo 1080p 10s", facts: { seconds: 10, resolution: "1080p" } },
+      ],
+    },
+  ],
   protocols: [{ name: "openai_responses", supports: ["stream", "sync", "background"] }, "openai_video"],
   routes: [
     { method: "POST", path: "/kling/v1/videos/text2video", type: "submit", action: "text_to_video", decode: "decodeSubmit", render: "taskCreated" },
     { method: "POST", path: "/kling/v1/videos/image2video", type: "submit", action: "image_to_video", decode: "decodeSubmit", render: "taskCreated" },
     { method: "GET", path: "/kling/v1/videos/text2video/:task_id", type: "query", render: "taskStatus" },
     { method: "GET", path: "/kling/v1/videos/image2video/:task_id", type: "query", render: "taskStatus" },
+    // Model-agnostic 3.x routes: the model travels in the body as model or model_name.
+    { method: "POST", path: "/kling/text-to-video", type: "submit", action: "text_to_video", decode: "decodeV3BodySubmit", render: "taskCreated" },
+    { method: "POST", path: "/kling/image-to-video", type: "submit", action: "image_to_video", decode: "decodeV3BodySubmit", render: "taskCreated" },
+    { method: "GET", path: "/kling/tasks/:task_id", type: "query", render: "taskStatus" },
   ],
 };
 
@@ -107,6 +158,8 @@ function viaGateway(ctx) {
 
 function tokenFor(ctx) {
   if (viaGateway(ctx)) return ctx.apiKey;
+  // Developer-console API keys are sent as-is; accessKey|secretKey pairs are signed.
+  if (!ctx.apiKey.includes("|")) return ctx.apiKey.trim();
   const parts = ctx.apiKey.split("|");
   if (parts.length !== 2) throw new Error("invalid api_key, required format is accessKey|secretKey");
   const now = utils.unixNow();
@@ -140,6 +193,147 @@ function resolveKlingMode(model, mode) {
   if (!raw) return "std";
   if (raw !== "std" && raw !== "pro") throw new Error("mode must be std or pro");
   return raw;
+}
+
+// Kling 3.0 uses the developer-platform contract: the model is part of the
+// path, the body nests settings/options, and image-to-video sends `contents`.
+const V3_MODEL = "kling-3.0";
+const V3_TURBO_MODEL = "kling-3.0-turbo";
+const V3_MIN_DURATION = 3;
+const V3_MAX_DURATION = 15;
+// Turbo shares the contract but drops 4k, native audio, multi_shot and last frames.
+const V3_SPECS = {
+  [V3_MODEL]: { resolutions: ["720p", "1080p", "4k"], audio: true, multiShot: true, lastFrame: true },
+  [V3_TURBO_MODEL]: { resolutions: ["720p", "1080p"], audio: false, multiShot: false, lastFrame: false },
+};
+// Flat convenience fields folded into settings/options instead of being forwarded.
+const V3_FLAT_FIELDS = [
+  "model",
+  "model_name",
+  "mode",
+  "image",
+  "image_tail",
+  "duration",
+  "resolution",
+  "audio",
+  "multi_shot",
+  "aspect_ratio",
+  "callback_url",
+  "external_task_id",
+  "watermark_info",
+];
+
+function isV3(model) {
+  return Object.prototype.hasOwnProperty.call(V3_SPECS, model);
+}
+
+function plainObject(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+}
+
+// duration, resolution and audio are billing multipliers, so they are bounded
+// here for native bodies and OpenAI-style requests alike.
+function v3Settings(req, action, model) {
+  const spec = V3_SPECS[model];
+  const metadata = plainObject(req.metadata);
+  const settings = Object.assign({}, plainObject(metadata.settings));
+  const pick = function (key, fallback) {
+    if (settings[key] !== undefined && settings[key] !== null) return settings[key];
+    if (metadata[key] !== undefined && metadata[key] !== null) return metadata[key];
+    return fallback;
+  };
+  const duration = Number(pick("duration", req.duration === undefined ? 5 : req.duration));
+  if (!Number.isInteger(duration) || duration < V3_MIN_DURATION || duration > V3_MAX_DURATION) {
+    throw new Error(model + " duration must be an integer between " + V3_MIN_DURATION + " and " + V3_MAX_DURATION);
+  }
+  settings.duration = duration;
+  const resolution = trimmed(pick("resolution", req.resolution || "720p")).toLowerCase();
+  if (!spec.resolutions.includes(resolution)) throw new Error(model + " resolution must be one of " + spec.resolutions.join(", "));
+  settings.resolution = resolution;
+  const audio = trimmed(pick("audio", "off")).toLowerCase();
+  if (audio !== "native" && audio !== "off") throw new Error(model + " audio must be native or off");
+  if (spec.audio) settings.audio = audio;
+  else if (audio !== "off") throw new Error(model + " does not support native audio");
+  else delete settings.audio;
+  const multiShot = pick("multi_shot", undefined);
+  if (multiShot !== undefined) {
+    if (typeof multiShot !== "boolean") throw new Error(model + " multi_shot must be a boolean");
+    if (!spec.multiShot && multiShot) throw new Error(model + " does not support multi_shot");
+    if (spec.multiShot) settings.multi_shot = multiShot;
+    else delete settings.multi_shot;
+  }
+  // Image-to-video inherits the first frame's aspect ratio.
+  const ratio = pick("aspect_ratio", req.size ? aspectRatio(req.size) : undefined);
+  delete settings.aspect_ratio;
+  if (action !== "image_to_video" && ratio !== undefined) settings.aspect_ratio = ratio;
+  return settings;
+}
+
+function v3Contents(req, metadata, model) {
+  const spec = V3_SPECS[model];
+  if (Array.isArray(metadata.contents)) {
+    const contents = metadata.contents.map(function (item) {
+      const entry = Object.assign({}, plainObject(item));
+      if (entry.url !== undefined) entry.url = filePlaceholder(entry.url);
+      return entry;
+    });
+    const hasFirstFrame = contents.some(function (item) {
+      return item.type === "first_frame";
+    });
+    if (!hasFirstFrame) throw new Error(model + " image-to-video requires a first_frame content");
+    const hasLastFrame = contents.some(function (item) {
+      return item.type === "last_frame";
+    });
+    if (hasLastFrame && !spec.lastFrame) throw new Error(model + " does not support last_frame");
+    return contents;
+  }
+  const first = req.image || metadata.image;
+  if (!first) throw new Error(model + " image-to-video requires a first frame image");
+  if (metadata.image_tail && !spec.lastFrame) throw new Error(model + " does not support last_frame");
+  const contents = [];
+  if (trimmed(req.prompt)) contents.push({ type: "prompt", text: req.prompt });
+  contents.push({ type: "first_frame", url: filePlaceholder(first) });
+  if (metadata.image_tail) contents.push({ type: "last_frame", url: filePlaceholder(metadata.image_tail) });
+  return contents;
+}
+
+function buildV3Body(req, action, model) {
+  const metadata = plainObject(req.metadata);
+  const body = {};
+  for (const key of Object.keys(metadata)) {
+    if (!V3_FLAT_FIELDS.includes(key)) body[key] = metadata[key];
+  }
+  if (action === "image_to_video") {
+    delete body.prompt;
+    body.contents = v3Contents(req, metadata, model);
+  } else {
+    delete body.contents;
+    const prompt = trimmed(req.prompt) ? req.prompt : metadata.prompt;
+    if (!trimmed(prompt)) throw new Error(model + " text-to-video requires a prompt");
+    body.prompt = prompt;
+  }
+  body.settings = v3Settings(req, action, model);
+  const options = Object.assign({}, plainObject(metadata.options));
+  for (const key of ["callback_url", "external_task_id", "watermark_info"]) {
+    if (options[key] === undefined && metadata[key] !== undefined && metadata[key] !== null) options[key] = metadata[key];
+  }
+  if (Object.keys(options).length) body.options = options;
+  else delete body.options;
+  return body;
+}
+
+// GET /tasks?task_ids= answers with a task list; the persisted snapshot keeps that shape.
+function v3Task(body) {
+  const data = body && Array.isArray(body.data) ? body.data : null;
+  return data && data.length ? plainObject(data[0]) : null;
+}
+
+function v3VideoURL(task) {
+  const outputs = task && Array.isArray(task.outputs) ? task.outputs : [];
+  for (const output of outputs) {
+    if (output && output.type === "video" && trimmed(output.url)) return trimmed(output.url);
+  }
+  return "";
 }
 
 function perSecondRate(model, mode) {
@@ -209,17 +403,57 @@ function decodeNativeSubmit(ctx) {
   };
 }
 
+// Native Kling 3.x bodies name the model in the body; the upstream path is
+// derived from it at submit time.
+function decodeV3For(model, ctx) {
+  if (!ctx.body || ctx.body.kind !== "json") throw new Error("JSON body required");
+  const body = ctx.body.value;
+  if (!body || typeof body !== "object" || Array.isArray(body)) throw new Error("request body must be an object");
+  return {
+    kind: "submit",
+    model: model,
+    requestBody: { model: model, prompt: typeof body.prompt === "string" ? body.prompt : "", metadata: body },
+  };
+}
+
+function decodeV3BodySubmit(ctx) {
+  const body = ctx.body && ctx.body.kind === "json" ? ctx.body.value : null;
+  const source = body && typeof body === "object" && !Array.isArray(body) ? body : {};
+  const model = trimmed(source.model || source.model_name);
+  if (!model) throw new Error("model is required");
+  if (!isV3(model)) throw new Error("model " + model + " is not supported on this route; supported: " + Object.keys(V3_SPECS).join(", "));
+  return decodeV3For(model, ctx);
+}
+
+// Kling 3.0 identifies tasks by `id` (a single object on create, a list on
+// query) instead of the legacy `task_id`.
+function isV3Data(data) {
+  return Array.isArray(data) || (data && typeof data === "object" && data.id !== undefined && data.task_id === undefined);
+}
+
+function v3PublicResult(result, taskID) {
+  const tasks = Array.isArray(result.data) ? result.data : [result.data];
+  return Object.assign({}, result, {
+    data: tasks.map(function (item) {
+      return Object.assign({}, plainObject(item), { id: taskID });
+    }),
+  });
+}
+
 export const native = {
   decodeSubmit: decodeNativeSubmit,
+  decodeV3BodySubmit: decodeV3BodySubmit,
   taskCreated: function (ctx, task) {
     const result = task.data || {},
       data = result.data || {};
+    if (isV3Data(data)) return Object.assign({}, result, { data: Object.assign({}, plainObject(data), { id: task.task_id }) });
     return Object.assign({}, result, { data: Object.assign({}, data, { task_id: task.task_id }) });
   },
   taskStatus: function (ctx, task) {
     if (task.data && typeof task.data === "object" && !Array.isArray(task.data)) {
-      const result = task.data,
-        data = result.data && typeof result.data === "object" ? result.data : {};
+      const result = task.data;
+      if (isV3Data(result.data)) return v3PublicResult(result, task.task_id);
+      const data = result.data && typeof result.data === "object" ? result.data : {};
       return Object.assign({}, result, { data: Object.assign({}, data, { task_id: task.task_id }) });
     }
     const statusMap = { NOT_START: "submitted", SUBMITTED: "submitted", QUEUED: "submitted", IN_PROGRESS: "processing", SUCCESS: "succeed", FAILURE: "failed" };
@@ -233,6 +467,25 @@ export const native = {
 export function buildSubmitRequest(ctx) {
   const req = ctx.requestBody;
   const metadata = req.metadata || {};
+  const v3Model = ctx.upstreamModel || ctx.model;
+  if (isV3(v3Model)) {
+    let v3Action = ctx.action;
+    if (v3Action !== "text_to_video" && v3Action !== "image_to_video") {
+      v3Action = Array.isArray(metadata.contents) || hasKlingImage(req, false) ? "image_to_video" : "text_to_video";
+    }
+    const path = v3Action === "image_to_video" ? "/image-to-video" : "/text-to-video";
+    // Kling names the model in the path; a New API gateway takes it in the body.
+    const gateway = viaGateway(ctx);
+    const body = buildV3Body(req, v3Action, v3Model);
+    if (gateway) body.model = v3Model;
+    return {
+      url: ctx.baseUrl + (gateway ? "/kling" + path : path + "/" + v3Model),
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json", Authorization: "Bearer " + tokenFor(ctx) },
+      body: body,
+      action: v3Action,
+    };
+  }
   const inferredAction = req.image || metadata.image || metadata.image_tail ? "image_to_video" : "text_to_video";
   const action = ctx.action === "text_to_video" || ctx.action === "image_to_video" ? ctx.action : inferredAction;
   const model = ctx.upstreamModel || "kling-v1";
@@ -266,20 +519,35 @@ export function buildSubmitRequest(ctx) {
 export function parseSubmitResponse(ctx, resp) {
   const result = resp.body || {};
   if (result.code !== 0) throw new Error(result.message || "kling submit failed");
-  if (!result.data || !result.data.task_id) throw new Error("missing task_id");
-  return { taskId: result.data.task_id, taskData: result };
+  const data = result.data || {};
+  const taskId = isV3(ctx.upstreamModel || ctx.model) ? data.id : data.task_id;
+  if (!taskId) throw new Error("missing task_id");
+  return { taskId: taskId, taskData: result };
 }
 
 export function extractUsage(ctx) {
   if (ctx.usagePurpose === "billing_ratios") return null;
   const req = ctx.requestBody || {};
   const model = submitModel(ctx, req);
+  if (isV3(model)) {
+    const settings = v3Settings(req, ctx.action, model);
+    if (!V3_SPECS[model].audio) return { seconds: settings.duration, resolution: settings.resolution };
+    return { seconds: settings.duration, resolution: settings.resolution, native_audio: settings.audio === "native" };
+  }
   const duration = outboundDuration(req);
   const mode = outboundMode(req, model);
   return { units: estimateUnits(model, mode, duration) };
 }
 
 export function buildQueryRequest(ctx) {
+  if (isV3(ctx.upstreamModel || ctx.model)) {
+    const id = encodeURIComponent(ctx.taskId);
+    return {
+      url: ctx.baseUrl + (viaGateway(ctx) ? "/kling/tasks/" + id : "/tasks?task_ids=" + id),
+      method: "GET",
+      headers: { Accept: "application/json", Authorization: "Bearer " + tokenFor(ctx) },
+    };
+  }
   return {
     url: urlFor(ctx, ctx.action) + "/" + ctx.taskId,
     method: "GET",
@@ -288,6 +556,17 @@ export function buildQueryRequest(ctx) {
 }
 
 export function parseTaskResult(ctx, body) {
+  if (Array.isArray(body.data)) {
+    const task = v3Task(body);
+    if (!task) return { status: "UNKNOWN", reason: body.message || "task not found" };
+    const v3Statuses = { submitted: "SUBMITTED", processing: "IN_PROGRESS", succeeded: "SUCCESS", failed: "FAILURE" };
+    const v3Status = v3Statuses[task.status];
+    if (!v3Status) return { status: "UNKNOWN", reason: "unknown task status: " + String(task.status || "") };
+    const v3Result = { code: body.code || 0, taskId: task.id, status: v3Status, reason: v3Status === "FAILURE" ? task.message || "task failed" : "" };
+    const url = v3Status === "SUCCESS" ? v3VideoURL(task) : "";
+    if (url) v3Result.url = url;
+    return v3Result;
+  }
   const data = body.data || {};
   const statuses = { submitted: "SUBMITTED", processing: "IN_PROGRESS", succeed: "SUCCESS", failed: "FAILURE" };
   const status = statuses[data.task_status];
@@ -310,7 +589,9 @@ function artifactData(ctx) {
 }
 
 function artifactVideoURL(ctx) {
-  const result = (artifactData(ctx).data || {}).task_result || {};
+  const snapshot = artifactData(ctx);
+  if (Array.isArray(snapshot.data)) return v3VideoURL(v3Task(snapshot));
+  const result = (snapshot.data || {}).task_result || {};
   const videos = Array.isArray(result.videos) ? result.videos : [];
   return videos.length ? String(videos[0].url || "").trim() : "";
 }
